@@ -311,15 +311,85 @@ def angle_from_vertical_3d(top, bottom):
     return np.degrees(np.arccos(np.clip(cos_a, -1, 1)))
 
 
-def frontal_plane_angle_from_vertical(top, bottom):
-    """Angle from vertical projected into frontal (x-y) plane. For hip ABD/ADD."""
-    dx = top[0] - bottom[0]
-    dy = top[1] - bottom[1]
-    seg_len = math.sqrt(dx*dx + dy*dy)
-    if seg_len < 1e-6:
+
+def normalize_vec(v):
+    """Normalize a 3D vector. Returns zero vector if magnitude is too small."""
+    n = np.linalg.norm(v)
+    if n < 1e-6:
+        return np.zeros(3)
+    return v / n
+
+
+def trunk_axis(world_pts):
+    """Trunk vertical axis: mid-hip -> mid-shoulder, normalized. Returns 3D unit vector pointing up along trunk."""
+    wp = world_pts
+    if SHOULDER_L not in wp or SHOULDER_R not in wp or HIP_L not in wp or HIP_R not in wp:
+        return None
+    mid_s = np.array([(wp[SHOULDER_L][0]+wp[SHOULDER_R][0])/2,
+                      (wp[SHOULDER_L][1]+wp[SHOULDER_R][1])/2,
+                      (wp[SHOULDER_L][2]+wp[SHOULDER_R][2])/2])
+    mid_h = np.array([(wp[HIP_L][0]+wp[HIP_R][0])/2,
+                      (wp[HIP_L][1]+wp[HIP_R][1])/2,
+                      (wp[HIP_L][2]+wp[HIP_R][2])/2])
+    axis = mid_s - mid_h  # points from hips up to shoulders
+    return normalize_vec(axis)
+
+
+def angle_between_vectors(v1, v2):
+    """Angle in degrees between two 3D vectors."""
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+    if n1 < 1e-6 or n2 < 1e-6:
         return 0.0
-    cos_a = -dy / seg_len  # vertical = (0, -1)
-    return np.degrees(np.arccos(np.clip(cos_a, -1, 1)))
+    c = np.dot(v1, v2) / (n1 * n2)
+    return np.degrees(np.arccos(np.clip(c, -1, 1)))
+
+
+def gonio_shoulder_flex(world_pts, side):
+    """Shoulder flexion: angle between trunk axis (pointing down = arm-at-side) and upper arm.
+    0° = arm at side, 90° = arm horizontal, 180° = arm overhead."""
+    wp = world_pts
+    trunk_up = trunk_axis(wp)
+    if trunk_up is None:
+        return None
+    sh = SHOULDER_L if side == 'l' else SHOULDER_R
+    el = ELBOW_L if side == 'l' else ELBOW_R
+    if sh not in wp or el not in wp:
+        return None
+    arm = np.array(wp[el]) - np.array(wp[sh])  # shoulder -> elbow
+    # Arm at side = parallel to trunk pointing down = -trunk_up
+    return angle_between_vectors(-trunk_up, arm)
+
+
+def gonio_hip_abd(world_pts, side):
+    """Hip ABD: angle between pelvis midline (downward along trunk) and femur (hip->knee).
+    0° = legs together along trunk axis, positive = abducted."""
+    wp = world_pts
+    trunk_up = trunk_axis(wp)
+    if trunk_up is None:
+        return None
+    hip = HIP_L if side == 'l' else HIP_R
+    knee = KNEE_L if side == 'l' else KNEE_R
+    if hip not in wp or knee not in wp:
+        return None
+    femur = np.array(wp[knee]) - np.array(wp[hip])  # hip -> knee
+    pelvis_down = -trunk_up  # trunk axis pointing downward
+    return angle_between_vectors(pelvis_down, femur)
+
+
+def gonio_shoulder_abd(world_pts, side):
+    """Shoulder ABD: angle between trunk axis (pointing down) and upper arm (shoulder->elbow).
+    0° = arm at side, 90° = arm horizontal."""
+    wp = world_pts
+    trunk_up = trunk_axis(wp)
+    if trunk_up is None:
+        return None
+    sh = SHOULDER_L if side == 'l' else SHOULDER_R
+    el = ELBOW_L if side == 'l' else ELBOW_R
+    if sh not in wp or el not in wp:
+        return None
+    arm = np.array(wp[el]) - np.array(wp[sh])
+    return angle_between_vectors(-trunk_up, arm)
 
 
 def detect_view(pts, frame_w=1080):
@@ -375,11 +445,14 @@ def compute_joint_angles(world_pts, pts_2d):
     if SHOULDER_R in wp and ELBOW_R in wp and WRIST_R in wp:
         a['r_elbow'] = angle_at_3d(wp[SHOULDER_R], wp[ELBOW_R], wp[WRIST_R])
 
-    # Shoulder FLEX/EXT
-    if HIP_L in wp and SHOULDER_L in wp and ELBOW_L in wp:
-        a['l_shoulder'] = angle_at_3d(wp[HIP_L], wp[SHOULDER_L], wp[ELBOW_L])
-    if HIP_R in wp and SHOULDER_R in wp and ELBOW_R in wp:
-        a['r_shoulder'] = angle_at_3d(wp[HIP_R], wp[SHOULDER_R], wp[ELBOW_R])
+    # Shoulder FLEX/EXT — goniometric: angle between trunk axis and upper arm
+    # 0° = arm at side, 90° = arm horizontal, 180° = overhead
+    l_sh_flex = gonio_shoulder_flex(wp, 'l')
+    if l_sh_flex is not None:
+        a['l_shoulder'] = l_sh_flex
+    r_sh_flex = gonio_shoulder_flex(wp, 'r')
+    if r_sh_flex is not None:
+        a['r_shoulder'] = r_sh_flex
 
     # Hip FLEX/EXT
     if SHOULDER_L in wp and HIP_L in wp and KNEE_L in wp:
@@ -432,17 +505,23 @@ def compute_joint_angles(world_pts, pts_2d):
 
     # ── Frontal plane angles (meaningful in front view) ──
 
-    # Hip ABD/ADD — angle of thigh from vertical in frontal plane (world x-y)
-    if HIP_L in wp and KNEE_L in wp:
-        a['l_hip_abd'] = frontal_plane_angle_from_vertical(wp[KNEE_L], wp[HIP_L])
-    if HIP_R in wp and KNEE_R in wp:
-        a['r_hip_abd'] = frontal_plane_angle_from_vertical(wp[KNEE_R], wp[HIP_R])
+    # Hip ABD/ADD — goniometric: angle between pelvis midline (trunk down) and femur
+    # 0° = legs together along trunk axis, positive = abducted
+    l_hip_abd = gonio_hip_abd(wp, 'l')
+    if l_hip_abd is not None:
+        a['l_hip_abd'] = l_hip_abd
+    r_hip_abd = gonio_hip_abd(wp, 'r')
+    if r_hip_abd is not None:
+        a['r_hip_abd'] = r_hip_abd
 
-    # Shoulder ABD — angle of upper arm from trunk in frontal plane
-    if SHOULDER_L in wp and ELBOW_L in wp:
-        a['l_sh_abd'] = frontal_plane_angle_from_vertical(wp[ELBOW_L], wp[SHOULDER_L])
-    if SHOULDER_R in wp and ELBOW_R in wp:
-        a['r_sh_abd'] = frontal_plane_angle_from_vertical(wp[ELBOW_R], wp[SHOULDER_R])
+    # Shoulder ABD — goniometric: angle between trunk axis and upper arm
+    # 0° = arm at side, 90° = arm horizontal
+    l_sh_abd = gonio_shoulder_abd(wp, 'l')
+    if l_sh_abd is not None:
+        a['l_sh_abd'] = l_sh_abd
+    r_sh_abd = gonio_shoulder_abd(wp, 'r')
+    if r_sh_abd is not None:
+        a['r_sh_abd'] = r_sh_abd
 
     # Ankle eversion/inversion — frontal plane angle of foot relative to horizontal
     # Uses HEEL→FOOT_INDEX vector projected into frontal (x-y) plane
@@ -516,15 +595,6 @@ def draw_skeleton(f, pts):
         if a in pts and b in pts:
             cv2.line(f,pts[a],pts[b],ACCENT,2,cv2.LINE_AA)
 
-    # Cervical spine: mid-shoulders (C7) → nose
-    if SHOULDER_L in pts and SHOULDER_R in pts and NOSE in pts:
-        c7 = mid(pts[SHOULDER_L], pts[SHOULDER_R])
-        cv2.line(f, c7, pts[NOSE], ACCENT_DIM, 6, cv2.LINE_AA)
-        cv2.line(f, c7, pts[NOSE], ACCENT, 2, cv2.LINE_AA)
-        # Draw C7 joint marker
-        cv2.circle(f, c7, 5, ACCENT_DIM, -1, cv2.LINE_AA)
-        cv2.circle(f, c7, 3, ACCENT, -1, cv2.LINE_AA)
-
     for i in JOINTS:
         if i in pts:
             cv2.circle(f,pts[i],6,ACCENT_DIM,-1,cv2.LINE_AA)
@@ -581,6 +651,16 @@ def get_flexion_label(key, angle_deg, angles):
         return f"{angle_deg:.0f}\u00b0"
 
     joint_name, flex_label, ext_label = JOINT_TYPES[key]
+
+    # Shoulder uses goniometric convention: stored value IS the goniometric angle
+    # 0° = arm at side (neutral), positive = flexion
+    if 'shoulder' in key:
+        if angle_deg < 5:
+            return "NEUT"
+        return f"{flex_label} {angle_deg:.0f}\u00b0"
+
+    # Knee, hip, elbow: stored as included angle (180° = full extension)
+    # Convert: goniometric flexion = 180 - included angle
     if angle_deg >= 175:
         return f"{ext_label}"
     else:
@@ -588,9 +668,20 @@ def get_flexion_label(key, angle_deg, angles):
 
 
 def draw_joint_angles(f, pts, angles, view):
-    """Draw arc indicators and labels on all joints. 3D angles are view-independent."""
+    """Draw arc indicators and labels on joints appropriate to the view plane."""
+    # Sagittal plane: knee flex/ext, hip flex/ext, ankle DF/PF, shoulder flex/ext (no elbow)
+    sagittal_arcs = {'l_knee', 'r_knee', 'l_hip', 'r_hip', 'l_ankle', 'r_ankle',
+                     'l_shoulder', 'r_shoulder'}
+    # Frontal plane: elbow flex/ext is visible but nothing else from JOINT_ARCS
+    # (frontal metrics like ABD/ADD, valgus, eversion are shown in panel + FPPA labels)
+    frontal_arcs = {'l_elbow', 'r_elbow'}
+
+    show_keys = sagittal_arcs if view == 'side' else frontal_arcs
+
     for key, (p1_i, vertex_i, p2_i) in JOINT_ARCS.items():
         if key not in angles:
+            continue
+        if key not in show_keys:
             continue
         if p1_i not in pts or vertex_i not in pts or p2_i not in pts:
             continue
@@ -875,12 +966,16 @@ def draw_sagittal_panel(f, angles, rom_tracker, gait_tracker, w):
 
     rows.append(('spacer', '', None))
 
-    # Shoulder FLEX/EXT
+    # Shoulder FLEX/EXT — already goniometric (0° = arm at side)
     for side_label, key in [('L', 'l_shoulder'), ('R', 'r_shoulder')]:
         if key in angles:
-            cur = 180 - angles[key]
+            cur = angles[key]
+            if cur < 5:
+                label = "NEUT"
+            else:
+                label = f"FLEX {cur:.0f}\u00b0"
             color = GREEN
-            rows.append(('data', f'SHLDR {side_label}', f"FLEX {cur:.0f}\u00b0", color))
+            rows.append(('data', f'SHLDR {side_label}', label, color))
 
     # Trunk lean
     trunk = angles.get('trunk', 0)
@@ -960,7 +1055,7 @@ def process(input_path, output_path):
     total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"Processing: {input_path} \u2014 {w}x{h} @ {fps:.1f}fps, {total} frames")
 
-    out=cv2.VideoWriter(output_path,cv2.VideoWriter_fourcc(*'mp4v'),fps,(w,h))
+    out=cv2.VideoWriter(output_path,cv2.VideoWriter_fourcc(*'avc1'),fps,(w,h))
     options=PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path='/tmp/flekks-viz/pose_landmarker_heavy.task'),
         running_mode=RunningMode.VIDEO,num_poses=1,
