@@ -363,18 +363,29 @@ def gonio_shoulder_flex(world_pts, side):
 
 def gonio_hip_abd(world_pts, side):
     """Hip ABD: angle between pelvis midline (downward along trunk) and femur (hip->knee).
-    0° = legs together along trunk axis, positive = abducted."""
+    Positive = abducted (knee lateral to midline), negative = adducted (knee medial).
+    Normal ABD ROM: 0-45°."""
     wp = world_pts
     trunk_up = trunk_axis(wp)
     if trunk_up is None:
         return None
-    hip = HIP_L if side == 'l' else HIP_R
-    knee = KNEE_L if side == 'l' else KNEE_R
-    if hip not in wp or knee not in wp:
+    hip_i = HIP_L if side == 'l' else HIP_R
+    knee_i = KNEE_L if side == 'l' else KNEE_R
+    hip_other = HIP_R if side == 'l' else HIP_L
+    if hip_i not in wp or knee_i not in wp or hip_other not in wp:
         return None
-    femur = np.array(wp[knee]) - np.array(wp[hip])  # hip -> knee
+    femur = np.array(wp[knee_i]) - np.array(wp[hip_i])  # hip -> knee
     pelvis_down = -trunk_up  # trunk axis pointing downward
-    return angle_between_vectors(pelvis_down, femur)
+    angle = angle_between_vectors(pelvis_down, femur)
+    # Determine ABD vs ADD: is knee lateral (away from midline) or medial?
+    # Hip-to-hip vector points from this hip toward the other hip (toward midline)
+    toward_midline = np.array(wp[hip_other]) - np.array(wp[hip_i])
+    # Femur component along midline direction: positive = toward midline = ADDucting
+    femur_toward_mid = np.dot(femur, toward_midline)
+    if femur_toward_mid > 0:
+        return angle   # ABD (positive) — knee lateral, away from midline
+    else:
+        return -angle  # ADD (negative) — knee medial, toward midline
 
 
 def gonio_shoulder_abd(world_pts, side):
@@ -778,6 +789,87 @@ def draw_joint_angles(f, pts, angles, view):
                 cv2.rectangle(f, (tx-pad_x, ty-th-pad_y), (tx+tw+pad_x, ty+pad_y+1), border, 1, cv2.LINE_AA)
                 cv2.putText(f, ktype, (tx, ty), font, font_scale, color, 2, cv2.LINE_AA)
 
+    # Hip ABD/ADD arcs at hips (frontal view only)
+    # Arc from vertical (trunk down) reference to femur direction
+    if view == 'front':
+        for prefix, hip_i, knee_i in [('l', HIP_L, KNEE_L), ('r', HIP_R, KNEE_R)]:
+            abd_key = f'{prefix}_hip_abd'
+            if abd_key not in angles or hip_i not in pts or knee_i not in pts:
+                continue
+            val = angles[abd_key]  # signed: positive=ABD, negative=ADD
+            abs_val = abs(val)
+            if abs_val < 2:
+                continue  # skip tiny angles
+
+            hip_pt = pts[hip_i]
+            knee_pt = pts[knee_i]
+
+            # Color based on clinical norms: ABD 0-45° normal, ADD typically < 30°
+            # Flag asymmetry between sides
+            other_key = 'r_hip_abd' if prefix == 'l' else 'l_hip_abd'
+            other_val = abs(angles.get(other_key, 0))
+            asym = abs(abs_val - other_val)
+            if asym > 10:
+                color = RED; label_color = RED
+            elif asym > 5:
+                color = ORANGE; label_color = YELLOW
+            else:
+                color = CYAN; label_color = CYAN
+
+            # Create a virtual "vertical down" point below the hip for the arc reference
+            femur_len = max(math.sqrt((knee_pt[0]-hip_pt[0])**2 + (knee_pt[1]-hip_pt[1])**2), 1)
+            vert_pt = (hip_pt[0], int(hip_pt[1] + femur_len * 0.6))
+
+            # Draw the arc between vertical reference and femur
+            radius = min(32, max(20, int(femur_len * 0.2)))
+            draw_arc(f, hip_pt, vert_pt, knee_pt, abs_val, color, radius=radius, thickness=2)
+
+            # Draw thin vertical reference line
+            cv2.line(f, hip_pt, vert_pt, (50, 50, 50), 1, cv2.LINE_AA)
+
+            # Label: ABD/NEUT/ADD
+            if val > 3:
+                label = f"ABD {abs_val:.0f}\u00b0"
+            elif val < -3:
+                label = f"ADD {abs_val:.0f}\u00b0"
+            else:
+                label = "NEUT"
+
+            # Position label well outside body (left hip -> far left, right hip -> far right)
+            label_dir = -1 if prefix == 'l' else 1
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, 1)
+
+            outward_offset = int(femur_len * 0.55)  # scale with body size
+            tx = hip_pt[0] + label_dir * outward_offset
+            if prefix == 'l':
+                tx = tx - tw  # right-align for left hip
+            ty = hip_pt[1] + 4
+
+            # Clamp to frame
+            tx = max(5, min(tx, f.shape[1] - tw - 5))
+            ty = max(16, min(ty, f.shape[0] - 5))
+
+            # Background pill
+            pad_x, pad_y = 5, 3
+            x1, y1 = tx - pad_x, ty - th - pad_y
+            x2, y2 = tx + tw + pad_x, ty + pad_y + 1
+            overlay = f.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), DARK_BG, -1)
+            cv2.addWeighted(overlay, 0.8, f, 0.2, 0, f)
+            border_color = tuple(max(c//2, 0) for c in label_color)
+            cv2.rectangle(f, (x1, y1), (x2, y2), border_color, 1, cv2.LINE_AA)
+            cv2.putText(f, label, (tx, ty), font, font_scale, label_color, 2, cv2.LINE_AA)
+
+            # Leader line from arc outward to label
+            leader_start_x = hip_pt[0] + label_dir * (radius + 2)
+            leader_start_y = hip_pt[1]
+            leader_end_x = tx if prefix == 'r' else tx + tw
+            leader_end_y = ty - th // 2
+            cv2.line(f, (leader_start_x, leader_start_y), (leader_end_x, leader_end_y),
+                     border_color, 1, cv2.LINE_AA)
+
 
 def draw_front_guides(f, pts, angles):
     for hip_i,knee_i,ankle_i,prefix in [(HIP_L,KNEE_L,ANKLE_L,'l'),(HIP_R,KNEE_R,ANKLE_R,'r')]:
@@ -843,9 +935,13 @@ def draw_frontal_panel(f, angles, rom_tracker, gait_tracker, w):
     # Hip ABD/ADD
     l_abd = angles.get('l_hip_abd', 0)
     r_abd = angles.get('r_hip_abd', 0)
-    abd_asym = abs(l_abd - r_abd)
+    abd_asym = abs(abs(l_abd) - abs(r_abd))
     abd_color = RED if abd_asym > 10 else (YELLOW if abd_asym > 5 else GREEN)
-    rows.append(('data', 'HIP ABD', f"L:{l_abd:.0f}\u00b0  R:{r_abd:.0f}\u00b0", abd_color))
+    def abd_label(v):
+        if v > 3: return f"ABD {v:.0f}\u00b0"
+        elif v < -3: return f"ADD {abs(v):.0f}\u00b0"
+        else: return "NEUT"
+    rows.append(('data', 'HIP ABD', f"L:{abd_label(l_abd)}  R:{abd_label(r_abd)}", abd_color))
 
     # Knee Valgus/Varus (FPPA)
     lf = angles.get('l_fppa', 0)
