@@ -70,7 +70,8 @@ SKELETON = [
     (23,25),(25,27),(24,26),(26,28),
     (27,29),(28,30),(27,31),(28,32),
 ]
-JOINTS = {7,8,11,12,13,14,15,16,23,24,25,26,27,28,29,30,31,32}
+NOSE = 0
+JOINTS = {0,7,8,11,12,13,14,15,16,23,24,25,26,27,28,29,30,31,32}
 SMOOTH_ALPHA = 0.45
 
 JOINT_TYPES = {
@@ -321,11 +322,15 @@ def frontal_plane_angle_from_vertical(top, bottom):
     return np.degrees(np.arccos(np.clip(cos_a, -1, 1)))
 
 
-def detect_view(pts):
+def detect_view(pts, frame_w=1080):
+    """Detect frontal vs sagittal view using relative shoulder/hip separation."""
     if SHOULDER_L not in pts or SHOULDER_R not in pts: return 'front'
     dx=abs(pts[SHOULDER_L][0]-pts[SHOULDER_R][0])
     hw=abs(pts[HIP_L][0]-pts[HIP_R][0]) if HIP_L in pts and HIP_R in pts else 0
-    return 'side' if (dx+hw)/2 < 80 else 'front'
+    avg_sep = (dx+hw)/2
+    # Use 15% of frame width as threshold — accounts for different resolutions
+    threshold = frame_w * 0.15
+    return 'side' if avg_sep < threshold else 'front'
 
 
 def compute_movement(prev, curr):
@@ -439,6 +444,23 @@ def compute_joint_angles(world_pts, pts_2d):
     if SHOULDER_R in wp and ELBOW_R in wp:
         a['r_sh_abd'] = frontal_plane_angle_from_vertical(wp[ELBOW_R], wp[SHOULDER_R])
 
+    # Ankle eversion/inversion — frontal plane angle of foot relative to horizontal
+    # Uses HEEL→FOOT_INDEX vector projected into frontal (x-y) plane
+    # Eversion = foot sole faces outward (positive), Inversion = inward (negative)
+    for heel_i, foot_i, prefix in [(HEEL_L, FOOT_L, 'l'), (HEEL_R, FOOT_R, 'r')]:
+        if heel_i in wp and foot_i in wp:
+            fx = wp[foot_i][0] - wp[heel_i][0]  # medial-lateral
+            fy = wp[foot_i][1] - wp[heel_i][1]  # vertical
+            foot_len = math.sqrt(fx*fx + fy*fy)
+            if foot_len > 1e-6:
+                # Angle from horizontal
+                tilt = np.degrees(np.arctan2(-fy, abs(fx)))
+                # Eversion = foot tilts outward: L foot tilts left (+x), R foot tilts right (-x)
+                if prefix == 'l':
+                    a[f'{prefix}_ev_inv'] = tilt if fx > 0 else -tilt
+                else:
+                    a[f'{prefix}_ev_inv'] = tilt if fx < 0 else -tilt
+
     # ── Asymmetries ──
     for joint in ['elbow','shoulder','hip','knee','ankle']:
         lk, rk = f'l_{joint}', f'r_{joint}'
@@ -493,6 +515,16 @@ def draw_skeleton(f, pts):
     for a,b in SKELETON:
         if a in pts and b in pts:
             cv2.line(f,pts[a],pts[b],ACCENT,2,cv2.LINE_AA)
+
+    # Cervical spine: mid-shoulders (C7) → nose
+    if SHOULDER_L in pts and SHOULDER_R in pts and NOSE in pts:
+        c7 = mid(pts[SHOULDER_L], pts[SHOULDER_R])
+        cv2.line(f, c7, pts[NOSE], ACCENT_DIM, 6, cv2.LINE_AA)
+        cv2.line(f, c7, pts[NOSE], ACCENT, 2, cv2.LINE_AA)
+        # Draw C7 joint marker
+        cv2.circle(f, c7, 5, ACCENT_DIM, -1, cv2.LINE_AA)
+        cv2.circle(f, c7, 3, ACCENT, -1, cv2.LINE_AA)
+
     for i in JOINTS:
         if i in pts:
             cv2.circle(f,pts[i],6,ACCENT_DIM,-1,cv2.LINE_AA)
@@ -556,25 +588,11 @@ def get_flexion_label(key, angle_deg, angles):
 
 
 def draw_joint_angles(f, pts, angles, view):
-    """Draw arc indicators and labels on joints. Filter by view plane."""
-    # In frontal view, only show frontal-relevant arcs (skip sagittal-only joints)
-    # In sagittal view, show sagittal-relevant arcs
-    sagittal_keys = {'l_knee', 'r_knee', 'l_hip', 'r_hip', 'l_ankle', 'r_ankle',
-                     'l_shoulder', 'r_shoulder', 'l_elbow', 'r_elbow'}
-    frontal_keys = {'l_elbow', 'r_elbow'}  # elbows visible in both views
-
+    """Draw arc indicators and labels on all joints. 3D angles are view-independent."""
     for key, (p1_i, vertex_i, p2_i) in JOINT_ARCS.items():
         if key not in angles:
             continue
         if p1_i not in pts or vertex_i not in pts or p2_i not in pts:
-            continue
-
-        # Filter: in frontal view, skip sagittal-only joints (knee flex, hip flex, ankle DF)
-        if view == 'front' and key in {'l_knee', 'r_knee', 'l_hip', 'r_hip', 'l_ankle', 'r_ankle',
-                                        'l_shoulder', 'r_shoulder'}:
-            continue
-        # In side view, show all sagittal arcs
-        if view == 'side' and key not in sagittal_keys:
             continue
 
         val = angles[key]
@@ -751,6 +769,18 @@ def draw_frontal_panel(f, angles, rom_tracker, gait_tracker, w):
     worse_circ = max(l_circ, r_circ)
     circ_color = RED if worse_circ > circ_thresh*1.5 else (YELLOW if worse_circ > circ_thresh else GREEN)
     rows.append(('data', 'CIRCUMDUCT', f"L:{l_circ:.0f}px  R:{r_circ:.0f}px", circ_color))
+
+    # Ankle eversion/inversion
+    l_ev = angles.get('l_ev_inv')
+    r_ev = angles.get('r_ev_inv')
+    if l_ev is not None and r_ev is not None:
+        def ev_label(v):
+            if v > 3: return f"EV {v:.0f}\u00b0"
+            elif v < -3: return f"INV {abs(v):.0f}\u00b0"
+            else: return "NEUT"
+        ev_asym = abs(l_ev - r_ev)
+        ev_color = RED if ev_asym > 10 else (YELLOW if ev_asym > 5 else GREEN)
+        rows.append(('data', 'ANKLE E/I', f"L:{ev_label(l_ev)}  R:{ev_label(r_ev)}", ev_color))
 
     rows.append(('spacer', '', None))
 
@@ -969,7 +999,7 @@ def process(input_path, output_path):
             histories[r].append(mv[r])
         prev_pts=pts
 
-        v=detect_view(pts)
+        v=detect_view(pts, w)
         if fidx<30: view_votes[v]+=1
         elif fidx==30:
             stable_view='front' if view_votes['front']>=view_votes['side'] else 'side'
