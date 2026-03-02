@@ -419,10 +419,20 @@ Heel-to-foot_index vector projected into frontal (x-y) plane. Eversion = foot so
 - Color by L/R asymmetry: cyan (< 6), orange/yellow (6-12), red (> 12)
 - Dimmed for near-extension (> 170)
 
+### Hip ABD/ADD Arc Indicators (Frontal View)
+- Vertical reference line drawn downward from each hip joint
+- Arc drawn between vertical reference and femur direction
+- Signed values: positive = ABD (away from midline), negative = ADD (toward midline)
+- Labels positioned well outside body (55% of femur length laterally) to avoid overlap
+- Leader line from arc to pill label
+- Labels: "ABD X°" / "NEUT" / "ADD X°" (threshold ±3°)
+- Color by L/R asymmetry (same scheme as flex/ext arcs)
+
 ### Labels
 - Pill-shaped dark background (80% opacity) with colored border
 - FLEX/EXT/DF/PF/NEUT prefix + degrees
 - Shoulder labels: "NEUT" when < 5, "FLEX X" otherwise (already goniometric)
+- Hip ABD/ADD labels: positioned laterally outside body to prevent overlap with skeleton
 
 ### Waveform
 - Per-region (torso, L arm, R arm, L leg, R leg) as overlapping glow lines
