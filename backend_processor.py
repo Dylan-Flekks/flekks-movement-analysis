@@ -383,6 +383,8 @@ def process(input_path, output_video_path=None, include_channels=False):
     out = None
     if output_video_path:
         out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (w, h))
+        if not out.isOpened():
+            out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
     # Pose landmarker
     options = PoseLandmarkerOptions(
