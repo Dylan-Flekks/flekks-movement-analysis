@@ -22,6 +22,8 @@ import sys
 import os
 import math
 
+PROCESSOR_VERSION = "2026-03-02.feed-overlay-streams-v1"
+
 # ── Re-use from gait_analyzer ──
 from gait_analyzer import (
     # Smoothers + trackers
@@ -507,9 +509,13 @@ def process(input_path, output_video_path=None, include_channels=False):
     # Build analysis summary
     analysis = build_analysis_summary(stable_view, duration_sec, rom_tracker, gait_tracker, view_votes)
 
-    output = {"frameTrack": frame_track, "analysis": analysis}
-    if channels:
-        output["bodyChannels"] = channels
+    output = {
+        "processorVersion": PROCESSOR_VERSION,
+        "frameTrack": frame_track,
+        "analysis": analysis,
+    }
+    if include_channels:
+        output["bodyChannels"] = channels or []
 
     print(f"Done. {fidx} frames processed.", file=sys.stderr)
     return output
