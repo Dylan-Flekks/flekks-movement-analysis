@@ -1,0 +1,14 @@
+# OpenSim / Pose2Sim / OpenCap integration dependencies
+# Install OpenSim first via conda:
+#   conda install -c opensim-org opensim
+#
+# Then install these pip packages:
+pose2sim>=0.10.0
+pygltflib>=1.16.0
+pandas>=2.0.0
+tensorflow>=2.9.0
+
+# Existing deps (unchanged):
+# opencv-python>=4.11.0
+# mediapipe>=0.10.21
+# numpy

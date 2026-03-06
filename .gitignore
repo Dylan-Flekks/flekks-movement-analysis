@@ -1,4 +1,15 @@
 v6_results/
+v7_reprocess/
 __pycache__/
 *.pyc
 .DS_Store
+
+# OpenSim model files and LSTM weights (large binaries)
+models/*.osim
+models/Geometry/
+models/marker_augmenter/*.h5
+models/marker_augmenter/*.npy
+
+# Temp processing directories
+pose2sim_trial/
+*.glb

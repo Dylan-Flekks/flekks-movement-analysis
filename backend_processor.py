@@ -8,9 +8,12 @@ Single entry point for server-side video processing. Produces:
 
 Usage:
     python3 backend_processor.py <input.mp4> [--output-video <path>] [--channels]
+        [--opensim] [--moco] [--height <m>] [--mass <kg>]
 
 Dependencies:
     pip3 install mediapipe opencv-python numpy
+    # For --opensim: conda install -c opensim-org opensim && pip install pose2sim
+    # For LSTM augmenter: pip install tensorflow
 """
 
 import cv2
@@ -21,8 +24,11 @@ import json
 import sys
 import os
 import math
+import logging
 
-PROCESSOR_VERSION = "2026-03-02.feed-overlay-streams-v1"
+logger = logging.getLogger(__name__)
+
+PROCESSOR_VERSION = "2026-03-06.opensim-integration-v1"
 
 # ── Re-use from gait_analyzer ──
 from gait_analyzer import (
@@ -365,8 +371,20 @@ def build_analysis_summary(detected_view, duration_sec, rom_tracker, gait_tracke
 
 # ── Main processing loop ──
 
-def process(input_path, output_video_path=None, include_channels=False):
-    """Process a video file. Returns JSON output dict."""
+def process(input_path, output_video_path=None, include_channels=False,
+            enable_opensim=False, run_moco=False,
+            subject_height_m=None, subject_mass_kg=None):
+    """Process a video file. Returns JSON output dict.
+
+    Args:
+        input_path: Path to input video file.
+        output_video_path: Path to write rendered video (optional).
+        include_channels: Whether to include body channel waveforms.
+        enable_opensim: Run OpenSim pipeline (IK + optional Moco).
+        run_moco: Run MocoInverse for muscle activations (slow).
+        subject_height_m: Subject height for model scaling.
+        subject_mass_kg: Subject mass for model scaling.
+    """
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -414,6 +432,7 @@ def process(input_path, output_video_path=None, include_channels=False):
     all_pos_3d = []
     all_pos_2d = []
     all_region_movements = {r: [] for r in REGION_LABELS}
+    all_world_landmarks = []  # Raw world landmarks for OpenSim path
 
     fidx = 0
     ts = 0.0
@@ -436,6 +455,10 @@ def process(input_path, output_video_path=None, include_channels=False):
         # 3D world landmarks for angle calculations
         world_lm = result.pose_world_landmarks[0] if result.pose_world_landmarks and len(result.pose_world_landmarks) > 0 else None
         world_pts = world_smoother.update(world_lm)
+
+        # Accumulate raw world landmarks for OpenSim path
+        if enable_opensim:
+            all_world_landmarks.append(world_lm)
 
         # Movement waveforms
         mv = compute_movement(prev_pts, pts)
@@ -480,9 +503,6 @@ def process(input_path, output_video_path=None, include_channels=False):
             draw_joint_angles(frame, pts, angles, v)
             if v == 'front':
                 draw_front_guides(frame, pts, angles)
-                draw_frontal_panel(frame, angles, rom_tracker, gait_tracker, w)
-            else:
-                draw_sagittal_panel(frame, angles, rom_tracker, gait_tracker, w)
             draw_waveform(frame, histories, w, h)
             out.write(frame)
 
@@ -517,29 +537,109 @@ def process(input_path, output_video_path=None, include_channels=False):
     if include_channels:
         output["bodyChannels"] = channels or []
 
+    # ── OpenSim path (additive — all existing output preserved) ──
+    if enable_opensim and all_world_landmarks:
+        print(f"  Running OpenSim pipeline ({len(all_world_landmarks)} frames)...",
+              file=sys.stderr)
+        opensim_block = _run_opensim_path(
+            all_world_landmarks, fps, run_moco,
+            subject_height_m, subject_mass_kg
+        )
+        if opensim_block:
+            output["opensim"] = opensim_block
+            print(f"  OpenSim: {len(opensim_block.get('jointAngles', {}))} "
+                  f"joint angle channels", file=sys.stderr)
+        else:
+            print("  OpenSim pipeline returned no results", file=sys.stderr)
+
     print(f"Done. {fidx} frames processed.", file=sys.stderr)
     return output
 
 
+def _run_opensim_path(world_landmarks_by_frame, fps, run_moco=False,
+                      subject_height_m=None, subject_mass_kg=None):
+    """Run the OpenSim processing pipeline on accumulated world landmarks.
+
+    This is called after the main MediaPipe loop completes. It:
+      1. Optionally runs LSTM marker augmentation (20 → 43 markers)
+      2. Runs Pose2Sim auto-scale + IK (or direct OpenSim IK fallback)
+      3. Optionally runs MocoInverse for muscle activations
+      4. Returns the additive 'opensim' JSON block
+
+    All existing output (skeleton, waveforms, angles, positions) is
+    unchanged — this is purely additive.
+    """
+    try:
+        from pose2sim_bridge import process_with_opensim
+    except ImportError as e:
+        logger.warning(f"OpenSim bridge not available: {e}")
+        print(f"  WARNING: pose2sim_bridge import failed: {e}", file=sys.stderr)
+        return None
+
+    # Try LSTM marker augmentation first (improves IK accuracy)
+    augmented_trc = None
+    try:
+        from marker_augmenter import augment_markers
+        import tempfile
+        aug_trc_path = os.path.join(
+            tempfile.gettempdir(), "flekks_augmented_markers.trc"
+        )
+        augmented_trc = augment_markers(
+            world_landmarks_by_frame, fps, aug_trc_path
+        )
+        if augmented_trc:
+            print("  LSTM marker augmentation: 20 → 43 markers", file=sys.stderr)
+    except Exception as e:
+        logger.info(f"LSTM augmentation skipped: {e}")
+        print(f"  LSTM augmentation skipped (not critical): {e}", file=sys.stderr)
+
+    # Run OpenSim pipeline
+    opensim_result = process_with_opensim(
+        world_landmarks_by_frame, fps,
+        subject_height_m=subject_height_m,
+        subject_mass_kg=subject_mass_kg,
+        run_moco=run_moco,
+        augmented_trc_path=augmented_trc,
+    )
+
+    return opensim_result
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 backend_processor.py <input.mp4> [--output-video <path>] [--channels]", file=sys.stderr)
+        print("Usage: python3 backend_processor.py <input.mp4> "
+              "[--output-video <path>] [--channels] [--opensim] [--moco] "
+              "[--height <m>] [--mass <kg>]", file=sys.stderr)
         sys.exit(1)
 
     input_path = sys.argv[1]
     output_video = None
     include_channels = "--channels" in sys.argv
+    enable_opensim = "--opensim" in sys.argv
+    run_moco = "--moco" in sys.argv
+    subject_height = None
+    subject_mass = None
 
-    # Parse --output-video <path>
+    # Parse named arguments
     for i, arg in enumerate(sys.argv):
         if arg == "--output-video" and i + 1 < len(sys.argv):
             output_video = sys.argv[i + 1]
+        elif arg == "--height" and i + 1 < len(sys.argv):
+            subject_height = float(sys.argv[i + 1])
+        elif arg == "--mass" and i + 1 < len(sys.argv):
+            subject_mass = float(sys.argv[i + 1])
 
     if not os.path.exists(input_path):
         print(f"ERROR: File not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    result = process(input_path, output_video, include_channels)
+    if enable_opensim:
+        print("OpenSim integration enabled", file=sys.stderr)
+        if run_moco:
+            print("MocoInverse enabled (this will be slow)", file=sys.stderr)
+
+    result = process(input_path, output_video, include_channels,
+                     enable_opensim, run_moco, subject_height, subject_mass)
 
     json.dump(result, sys.stdout, separators=(",", ":"))
     print(file=sys.stderr)
