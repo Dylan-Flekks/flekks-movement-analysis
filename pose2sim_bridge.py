@@ -251,7 +251,7 @@ def run_pose2sim_pipeline(trc_path, output_dir, model_path=None,
     }
 
     try:
-        import pose2sim  # noqa: delayed import
+        from Pose2Sim import Pose2Sim as pose2sim  # noqa: delayed import
 
         # Pose2Sim expects a specific directory structure:
         #   trial_dir/

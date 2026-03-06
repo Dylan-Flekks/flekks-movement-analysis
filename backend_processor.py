@@ -585,10 +585,12 @@ def _run_opensim_path(world_landmarks_by_frame, fps, run_moco=False,
             tempfile.gettempdir(), "flekks_augmented_markers.trc"
         )
         augmented_trc = augment_markers(
-            world_landmarks_by_frame, fps, aug_trc_path
+            world_landmarks_by_frame, fps, aug_trc_path,
+            subject_height_m=subject_height_m,
+            subject_mass_kg=subject_mass_kg,
         )
         if augmented_trc:
-            print("  LSTM marker augmentation: 20 → 43 markers", file=sys.stderr)
+            print("  LSTM marker augmentation: 15+7 → 43 markers", file=sys.stderr)
     except Exception as e:
         logger.info(f"LSTM augmentation skipped: {e}")
         print(f"  LSTM augmentation skipped (not critical): {e}", file=sys.stderr)
